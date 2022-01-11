@@ -18,6 +18,8 @@ class CLEVRDataset(BaseDataset):
         parser.set_defaults(input_nc=3, output_nc=3,
                             crop_size=192, # crop is done first
                             load_size=64,  # before resize
+                            image_height=64,
+                            image_width=64,
                             num_slots=11, display_ncols=11)
         return parser
 

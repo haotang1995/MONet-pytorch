@@ -621,15 +621,24 @@ class Flatten(nn.Module):
     def forward(self, x):
         return x.flatten(start_dim=1)
 
+def _torch_conv_out_size(in_size, kernal_size, stride, padding, ):
+    return int((in_size+2*padding-kernal_size)/stride+1)
 
 class ComponentVAE(nn.Module):
 
-    def __init__(self, input_nc, z_dim=16, full_res=False):
+    def __init__(self, input_nc, z_dim=16, full_res=False, input_height=64, input_width=64,):
         super().__init__()
         self._input_nc = input_nc
         self._z_dim = z_dim
         # full_res = False # full res: 128x128, low res: 64x64
         h_dim = 4096 if full_res else 1024
+        def _conv_out_size(size):
+            for _ in range(4):
+                size = _torch_conv_out_size(size, 3, 2, 1)
+            return size
+        _h = _conv_out_size(input_height)
+        _w = _conv_out_size(input_width)
+        h_dim = _h*_w*64
         self.encoder = nn.Sequential(
             nn.Conv2d(input_nc + 1, 32, 3, stride=2, padding=1),
             nn.ReLU(True),
@@ -642,10 +651,10 @@ class ComponentVAE(nn.Module):
             Flatten(),
             nn.Linear(h_dim, 256),
             nn.ReLU(True),
-            nn.Linear(256, 32)
+            nn.Linear(256, self._z_dim*2)
         )
         self.decoder = nn.Sequential(
-            nn.Conv2d(z_dim + 2, 32, 3),
+            nn.Conv2d(self._z_dim + 2, 32, 3),
             nn.ReLU(True),
             nn.Conv2d(32, 32, 3),
             nn.ReLU(True),
@@ -713,21 +722,34 @@ class AttentionBlock(nn.Module):
         self.norm = nn.InstanceNorm2d(output_nc, affine=True)
         self._resize = resize
 
-    def forward(self, *inputs):
+    def forward(self, *inputs, size=None,):
         downsampling = len(inputs) == 1
         x = inputs[0] if downsampling else torch.cat(inputs, dim=1)
         x = self.conv(x)
         x = self.norm(x)
         x = skip = F.relu(x)
-        if self._resize:
-            x = F.interpolate(skip, scale_factor=0.5 if downsampling else 2., mode='nearest')
+        if self._resize or size is not None:
+            x = F.interpolate(skip, size=size, scale_factor=None if size is not None else (0.5 if downsampling else 2.), mode='nearest')
         return (x, skip) if downsampling else x
 
+def _get_position_embedding(flag, d_model, h, w):
+    pe = torch.zeros([1,d_model,h,w])
+    if flag:
+        assert(d_model % 4==0), "_get_position_embedding only supports d_model % 4 == 0"
+        d_model = (d_model+1)//2
+        pos_h = torch.arange(h, dtype=torch.float)
+        pos_w = torch.arange(w, dtype=torch.float)
+        div_term = torch.exp(torch.arange(0, d_model, 2, dtype=torch.float) * (-torch.log(torch.tensor(1e4))/d_model)).unsqueeze(1)
+        pe[:,:d_model:2,] = torch.sin(pos_h * div_term).unsqueeze(0).unsqueeze(-1).expand(1, -1, -1, w)
+        pe[:,1:d_model:2,] = torch.cos(pos_h * div_term).unsqueeze(0).unsqueeze(-1).expand(1, -1, -1, w)
+        pe[:,d_model::2,] = torch.sin(pos_w * div_term).unsqueeze(0).unsqueeze(-2).expand(1, -1, h, -1,)
+        pe[:,d_model+1::2,] = torch.cos(pos_w * div_term).unsqueeze(0).unsqueeze(-2).expand(1, -1, h, -1,)
+    return pe
 
 class Attention(nn.Module):
     """Create a Unet-based generator"""
 
-    def __init__(self, input_nc, output_nc, ngf=64):
+    def __init__(self, input_nc, output_nc, input_height=64, input_width=64, ngf=64, position_embedding_flag=False,):
         """Construct a Unet generator
         Parameters:
             input_nc (int)  -- the number of channels in input images
@@ -740,7 +762,13 @@ class Attention(nn.Module):
         It is a recursive process.
         """
         super(Attention, self).__init__()
-        self.downblock1 = AttentionBlock(input_nc + 1, ngf)
+        self.position_embedding_flag = position_embedding_flag
+        if self.position_embedding_flag:
+            self.downblock0 = AttentionBlock(input_nc + 1, ngf, resize=False,)
+            self.position_embedding = nn.Parameter(_get_position_embedding(position_embedding_flag, ngf, input_height, input_width), requires_grad=False,)
+            self.downblock1 = AttentionBlock(ngf, ngf)
+        else:
+            self.downblock1 = AttentionBlock(input_nc + 1, ngf)
         self.downblock2 = AttentionBlock(ngf, ngf * 2)
         self.downblock3 = AttentionBlock(ngf * 2, ngf * 4)
         self.downblock4 = AttentionBlock(ngf * 4, ngf * 8)
@@ -748,12 +776,13 @@ class Attention(nn.Module):
         # no resizing occurs in the last block of each path
         # self.downblock6 = AttentionBlock(ngf * 8, ngf * 8, resize=False)
 
+        _h, _w = input_height//2//2//2//2, input_width//2//2//2//2
         self.mlp = nn.Sequential(
-            nn.Linear(4 * 4 * ngf * 8, 128),
+            nn.Linear(_h * _w * ngf * 8, 128),
             nn.ReLU(),
             nn.Linear(128, 128),
             nn.ReLU(),
-            nn.Linear(128, 4 * 4 * ngf * 8),
+            nn.Linear(128, _h * _w * ngf * 8),
             nn.ReLU(),
         )
 
@@ -769,7 +798,12 @@ class Attention(nn.Module):
 
     def forward(self, x, log_s_k):
         # Downsampling blocks
-        x, skip1 = self.downblock1(torch.cat((x, log_s_k), dim=1))
+        if self.position_embedding_flag:
+            x, _ = self.downblock0(torch.cat((x, log_s_k), dim=1))
+            x = x + self.position_embedding
+            x, skip1 = self.downblock1(x)
+        else:
+            x, skip1 = self.downblock1(torch.cat((x, log_s_k), dim=1))
         x, skip2 = self.downblock2(x)
         x, skip3 = self.downblock3(x)
         x, skip4 = self.downblock4(x)
@@ -784,10 +818,10 @@ class Attention(nn.Module):
         x = x.view(skip6.shape)
         # Upsampling blocks
         # x = self.upblock1(x, skip6)
-        x = self.upblock2(x, skip5)
-        x = self.upblock3(x, skip4)
-        x = self.upblock4(x, skip3)
-        x = self.upblock5(x, skip2)
+        x = self.upblock2(x, skip5, size=skip4.size()[-2:])
+        x = self.upblock3(x, skip4, size=skip3.size()[-2:])
+        x = self.upblock4(x, skip3, size=skip2.size()[-2:])
+        x = self.upblock5(x, skip2, size=skip1.size()[-2:])
         x = self.upblock6(x, skip1)
         # Output layer
         logits = self.output(x)
