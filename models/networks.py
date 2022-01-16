@@ -748,7 +748,7 @@ class AttentionBlock(nn.Module):
             if self.position_embedding is None or self.position_embedding.device != x.device or self.position_embedding.shape[-3:] != x.shape[-3:]:
                 self.position_embedding = nn.Parameter(_get_position_embedding(True, x.size(1), x.size(2), x.size(3), linear_position_embedding_flag=self.linear_position_embedding_flag), requires_grad=False,).to(x.device)
             if self.linear_position_embedding_flag:
-                x = torch.cat([x, self.position_embedding], dim=1)
+                x = torch.cat([x, self.position_embedding.expand([x.size(0),-1,-1,-1])], dim=1)
             else:
                 x = x + self.position_embedding
 
@@ -841,7 +841,7 @@ class Attention(nn.Module):
         if self.position_embedding_flag:
             x, _ = self.downblock0(torch.cat((x, log_s_k), dim=1))
             if self.linear_position_embedding_flag:
-                x = torch.cat([x, self.position_embedding], dim=1)
+                x = torch.cat([x, self.position_embedding.expand([x.size(0),-1,-1,-1])], dim=1)
             else:
                 x = x + self.position_embedding
             x, skip1 = self.downblock1(x)
