@@ -26,6 +26,7 @@ class MONetModel(BaseModel):
         parser.add_argument('--num_slots', metavar='K', type=int, default=7, help='Number of supported slots')
         parser.add_argument('--z_dim', type=int, default=16, help='Dimension of individual z latent per slot')
         parser.add_argument('--image_position_embedding_flag', action='store_true', default=False, help='Whether or not to use the position embeddings in the Attention module of MONet')
+        parser.add_argument('--per_layer_image_position_embedding_flag', action='store_true', default=False, help='Whether or not to use the position embeddings for each layer in the Attention module of MONet')
         parser.add_argument('--image_height', type=int, default=64, help='Height of input images')
         parser.add_argument('--image_width', type=int, default=64, help='Width of input images')
         if is_train:
@@ -50,7 +51,11 @@ class MONetModel(BaseModel):
                             ['xm{}'.format(i) for i in range(opt.num_slots)] + \
                             ['x', 'x_tilde']
         self.model_names = ['Attn', 'CVAE']
-        self.netAttn = networks.init_net(networks.Attention(opt.input_nc, 1, position_embedding_flag=opt.image_position_embedding_flag, input_height=opt.image_height, input_width=opt.image_width), gpu_ids=self.gpu_ids)
+        self.netAttn = networks.init_net(networks.Attention(
+            opt.input_nc, 1, position_embedding_flag=opt.image_position_embedding_flag,
+            per_layer_position_embedding_flag=opt.per_layer_image_position_embedding_flag,
+            input_height=opt.image_height, input_width=opt.image_width), gpu_ids=self.gpu_ids,
+        )
         self.netCVAE = networks.init_net(networks.ComponentVAE(opt.input_nc, opt.z_dim, input_height=opt.image_height, input_width=opt.image_width), gpu_ids=self.gpu_ids)
         # define networks; you can use opt.isTrain to specify different behaviors for training and test.
         if self.isTrain:  # only defined during training time
