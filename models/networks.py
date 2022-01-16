@@ -716,13 +716,27 @@ class ComponentVAE(nn.Module):
 
 class AttentionBlock(nn.Module):
 
-    def __init__(self, input_nc, output_nc, resize=True, position_embedding_flag=False,):
+    def __init__(
+        self, input_nc, output_nc,
+        resize=True, position_embedding_flag=False,
+        layer_num=1,
+    ):
         super().__init__()
         self.position_embedding_flag = position_embedding_flag
         if self.position_embedding_flag:
             self.position_embedding = None
-        self.conv = nn.Conv2d(input_nc, output_nc, 3, padding=1, bias=False)
-        self.norm = nn.InstanceNorm2d(output_nc, affine=True)
+        size_list = [input_nc,] + [output_nc,] * layer_num
+        self.module = nn.Sequential(*tuple(
+            mod
+            for li in range(layer_num)
+            for mod in [
+                nn.Conv2d(size_list[li], size_list[li+1], 3, padding=1, bias=False,),
+                nn.InstanceNorm2d(size_list[li+1], affine=True,),
+                nn.ReLU(),
+            ]
+        ))
+        # self.conv = nn.Conv2d(input_nc, output_nc, 3, padding=1, bias=False)
+        # self.norm = nn.InstanceNorm2d(output_nc, affine=True)
         self._resize = resize
 
     def forward(self, *inputs, size=None,):
@@ -734,9 +748,11 @@ class AttentionBlock(nn.Module):
                 self.position_embedding = nn.Parameter(_get_position_embedding(True, x.size(1), x.size(2), x.size(3)), requires_grad=False,).to(x.device)
             x = x + self.position_embedding
 
-        x = self.conv(x)
-        x = self.norm(x)
-        x = skip = F.relu(x)
+        x = skip = self.module(x)
+        # x = self.conv(x)
+        # x = self.norm(x)
+        # x = skip = F.relu(x)
+
         if self._resize or size is not None:
             x = F.interpolate(skip, size=size, scale_factor=None if size is not None else (0.5 if downsampling else 2.), mode='nearest')
         return (x, skip) if downsampling else x
@@ -761,6 +777,7 @@ class Attention(nn.Module):
     def __init__(
         self, input_nc, output_nc, input_height=64, input_width=64, ngf=64,
         position_embedding_flag=False, per_layer_position_embedding_flag=False,
+        per_block_layer_num=1,
     ):
         """Construct a Unet generator
         Parameters:
@@ -777,15 +794,15 @@ class Attention(nn.Module):
         super(Attention, self).__init__()
         self.position_embedding_flag = position_embedding_flag
         if self.position_embedding_flag:
-            self.downblock0 = AttentionBlock(input_nc + 1, ngf, resize=False,)
+            self.downblock0 = AttentionBlock(input_nc + 1, ngf, resize=False, layer_num=per_block_layer_num,)
             self.position_embedding = nn.Parameter(_get_position_embedding(position_embedding_flag, ngf, input_height, input_width), requires_grad=False,)
-            self.downblock1 = AttentionBlock(ngf, ngf)
+            self.downblock1 = AttentionBlock(ngf, ngf, layer_num=per_block_layer_num)
         else:
-            self.downblock1 = AttentionBlock(input_nc + 1, ngf, position_embedding_flag=False,)
-        self.downblock2 = AttentionBlock(ngf, ngf * 2, position_embedding_flag=per_layer_position_embedding_flag,)
-        self.downblock3 = AttentionBlock(ngf * 2, ngf * 4, position_embedding_flag=per_layer_position_embedding_flag,)
-        self.downblock4 = AttentionBlock(ngf * 4, ngf * 8, position_embedding_flag=per_layer_position_embedding_flag,)
-        self.downblock5 = AttentionBlock(ngf * 8, ngf * 8, resize=False, position_embedding_flag=per_layer_position_embedding_flag,)
+            self.downblock1 = AttentionBlock(input_nc + 1, ngf, position_embedding_flag=False, layer_num=per_block_layer_num,)
+        self.downblock2 = AttentionBlock(ngf, ngf * 2, position_embedding_flag=per_layer_position_embedding_flag, layer_num=per_block_layer_num,)
+        self.downblock3 = AttentionBlock(ngf * 2, ngf * 4, position_embedding_flag=per_layer_position_embedding_flag, layer_num=per_block_layer_num,)
+        self.downblock4 = AttentionBlock(ngf * 4, ngf * 8, position_embedding_flag=per_layer_position_embedding_flag, layer_num=per_block_layer_num,)
+        self.downblock5 = AttentionBlock(ngf * 8, ngf * 8, resize=False, position_embedding_flag=per_layer_position_embedding_flag, layer_num=per_block_layer_num,)
         # no resizing occurs in the last block of each path
         # self.downblock6 = AttentionBlock(ngf * 8, ngf * 8, resize=False)
 
@@ -800,12 +817,12 @@ class Attention(nn.Module):
         )
 
         # self.upblock1 = AttentionBlock(2 * ngf * 8, ngf * 8)
-        self.upblock2 = AttentionBlock(2 * ngf * 8, ngf * 8, position_embedding_flag=per_layer_position_embedding_flag,)
-        self.upblock3 = AttentionBlock(2 * ngf * 8, ngf * 4, position_embedding_flag=per_layer_position_embedding_flag,)
-        self.upblock4 = AttentionBlock(2 * ngf * 4, ngf * 2, position_embedding_flag=per_layer_position_embedding_flag,)
-        self.upblock5 = AttentionBlock(2 * ngf * 2, ngf, position_embedding_flag=per_layer_position_embedding_flag,)
+        self.upblock2 = AttentionBlock(2 * ngf * 8, ngf * 8, position_embedding_flag=per_layer_position_embedding_flag, layer_num=per_block_layer_num,)
+        self.upblock3 = AttentionBlock(2 * ngf * 8, ngf * 4, position_embedding_flag=per_layer_position_embedding_flag, layer_num=per_block_layer_num,)
+        self.upblock4 = AttentionBlock(2 * ngf * 4, ngf * 2, position_embedding_flag=per_layer_position_embedding_flag, layer_num=per_block_layer_num,)
+        self.upblock5 = AttentionBlock(2 * ngf * 2, ngf, position_embedding_flag=per_layer_position_embedding_flag, layer_num=per_block_layer_num,)
         # no resizing occurs in the last block of each path
-        self.upblock6 = AttentionBlock(2 * ngf, ngf, resize=False)
+        self.upblock6 = AttentionBlock(2 * ngf, ngf, resize=False, layer_num=per_block_layer_num)
 
         self.output = nn.Conv2d(ngf, output_nc, 1)
 
