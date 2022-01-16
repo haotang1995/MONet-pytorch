@@ -26,6 +26,7 @@ class MONetModel(BaseModel):
         parser.add_argument('--num_slots', metavar='K', type=int, default=7, help='Number of supported slots')
         parser.add_argument('--z_dim', type=int, default=16, help='Dimension of individual z latent per slot')
         parser.add_argument('--image_position_embedding_flag', action='store_true', default=False, help='Whether or not to use the position embeddings in the Attention module of MONet')
+        parser.add_argument('--image_linear_position_embedding_flag', action='store_true', default=False, help='Whether or not to use the linearlized position embeddings in the Attention module of MONet')
         parser.add_argument('--per_layer_image_position_embedding_flag', action='store_true', default=False, help='Whether or not to use the position embeddings for each layer in the Attention module of MONet')
         parser.add_argument('--image_height', type=int, default=64, help='Height of input images')
         parser.add_argument('--attention_per_block_layer_num', type=int, default=1, help='The number of Conv layers in each AttentionBlock of the Attention module of MONet')
@@ -56,6 +57,7 @@ class MONetModel(BaseModel):
             opt.input_nc, 1, position_embedding_flag=opt.image_position_embedding_flag,
             per_layer_position_embedding_flag=opt.per_layer_image_position_embedding_flag,
             per_block_layer_num=opt.attention_per_block_layer_num,
+            linear_position_embedding_flag=opt.image_linear_position_embedding_flag,
             input_height=opt.image_height, input_width=opt.image_width), gpu_ids=self.gpu_ids,
         )
         self.netCVAE = networks.init_net(networks.ComponentVAE(opt.input_nc, opt.z_dim, input_height=opt.image_height, input_width=opt.image_width), gpu_ids=self.gpu_ids)

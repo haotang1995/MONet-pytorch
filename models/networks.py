@@ -719,13 +719,14 @@ class AttentionBlock(nn.Module):
     def __init__(
         self, input_nc, output_nc,
         resize=True, position_embedding_flag=False,
-        layer_num=1,
+        layer_num=1, linear_position_embedding_flag=False,
     ):
         super().__init__()
         self.position_embedding_flag = position_embedding_flag
         if self.position_embedding_flag:
+            self.linear_position_embedding_flag = linear_position_embedding_flag
             self.position_embedding = None
-        size_list = [input_nc,] + [output_nc,] * layer_num
+        size_list = [input_nc+2*position_embedding_flag*linear_position_embedding_flag,] + [output_nc,] * layer_num
         self.module = nn.Sequential(*tuple(
             mod
             for li in range(layer_num)
@@ -745,8 +746,11 @@ class AttentionBlock(nn.Module):
 
         if self.position_embedding_flag:
             if self.position_embedding is None or self.position_embedding.device != x.device or self.position_embedding.shape[-3:] != x.shape[-3:]:
-                self.position_embedding = nn.Parameter(_get_position_embedding(True, x.size(1), x.size(2), x.size(3)), requires_grad=False,).to(x.device)
-            x = x + self.position_embedding
+                self.position_embedding = nn.Parameter(_get_position_embedding(True, x.size(1), x.size(2), x.size(3), linear_position_embedding_flag=self.linear_position_embedding_flag), requires_grad=False,).to(x.device)
+            if self.linear_position_embedding_flag:
+                x = torch.cat([x, self.position_embedding], dim=1)
+            else:
+                x = x + self.position_embedding
 
         x = skip = self.module(x)
         # x = self.conv(x)
@@ -757,18 +761,23 @@ class AttentionBlock(nn.Module):
             x = F.interpolate(skip, size=size, scale_factor=None if size is not None else (0.5 if downsampling else 2.), mode='nearest')
         return (x, skip) if downsampling else x
 
-def _get_position_embedding(flag, d_model, h, w):
+def _get_position_embedding(flag, d_model, h, w, linear_position_embedding_flag=False,):
     pe = torch.zeros([1,d_model,h,w])
     if flag:
-        assert(d_model % 4==0), "_get_position_embedding only supports d_model % 4 == 0"
-        d_model = (d_model+1)//2
-        pos_h = torch.arange(h, dtype=torch.float)
-        pos_w = torch.arange(w, dtype=torch.float)
-        div_term = torch.exp(torch.arange(0, d_model, 2, dtype=torch.float) * (-torch.log(torch.tensor(1e4))/d_model)).unsqueeze(1)
-        pe[:,:d_model:2,] = torch.sin(pos_h * div_term).unsqueeze(0).unsqueeze(-1).expand(1, -1, -1, w)
-        pe[:,1:d_model:2,] = torch.cos(pos_h * div_term).unsqueeze(0).unsqueeze(-1).expand(1, -1, -1, w)
-        pe[:,d_model::2,] = torch.sin(pos_w * div_term).unsqueeze(0).unsqueeze(-2).expand(1, -1, h, -1,)
-        pe[:,d_model+1::2,] = torch.cos(pos_w * div_term).unsqueeze(0).unsqueeze(-2).expand(1, -1, h, -1,)
+        if not linear_position_embedding_flag:
+            assert(d_model % 4==0), "_get_position_embedding only supports d_model % 4 == 0"
+            d_model = (d_model+1)//2
+            pos_h = torch.arange(h, dtype=torch.float)
+            pos_w = torch.arange(w, dtype=torch.float)
+            div_term = torch.exp(torch.arange(0, d_model, 2, dtype=torch.float) * (-torch.log(torch.tensor(1e4))/d_model)).unsqueeze(1)
+            pe[:,:d_model:2,] = torch.sin(pos_h * div_term).unsqueeze(0).unsqueeze(-1).expand(1, -1, -1, w)
+            pe[:,1:d_model:2,] = torch.cos(pos_h * div_term).unsqueeze(0).unsqueeze(-1).expand(1, -1, -1, w)
+            pe[:,d_model::2,] = torch.sin(pos_w * div_term).unsqueeze(0).unsqueeze(-2).expand(1, -1, h, -1,)
+            pe[:,d_model+1::2,] = torch.cos(pos_w * div_term).unsqueeze(0).unsqueeze(-2).expand(1, -1, h, -1,)
+        else:
+            pos_h = torch.linspace(0, 1, h).unsqueeze(1).expand([h,w])
+            pos_w = torch.linspace(0, 1, w).unsqueeze(0).expand([h,w])
+            pe = torch.stack([pos_h, pos_w], dim=0).unsqueeze(0)
     return pe
 
 class Attention(nn.Module):
@@ -777,7 +786,7 @@ class Attention(nn.Module):
     def __init__(
         self, input_nc, output_nc, input_height=64, input_width=64, ngf=64,
         position_embedding_flag=False, per_layer_position_embedding_flag=False,
-        per_block_layer_num=1,
+        per_block_layer_num=1, linear_position_embedding_flag=False,
     ):
         """Construct a Unet generator
         Parameters:
@@ -793,16 +802,17 @@ class Attention(nn.Module):
         assert(not (position_embedding_flag and per_layer_position_embedding_flag)), "position_embedding_flag and per_layer_position_embedding_flag in Attention module cannot both be True"
         super(Attention, self).__init__()
         self.position_embedding_flag = position_embedding_flag
+        self.linear_position_embedding_flag = linear_position_embedding_flag
         if self.position_embedding_flag:
             self.downblock0 = AttentionBlock(input_nc + 1, ngf, resize=False, layer_num=per_block_layer_num,)
-            self.position_embedding = nn.Parameter(_get_position_embedding(position_embedding_flag, ngf, input_height, input_width), requires_grad=False,)
-            self.downblock1 = AttentionBlock(ngf, ngf, layer_num=per_block_layer_num)
+            self.position_embedding = nn.Parameter(_get_position_embedding(position_embedding_flag, ngf, input_height, input_width, linear_position_embedding_flag=self.linear_position_embedding_flag,), requires_grad=False,)
+            self.downblock1 = AttentionBlock(ngf+2*self.linear_position_embedding_flag, ngf, layer_num=per_block_layer_num)
         else:
-            self.downblock1 = AttentionBlock(input_nc + 1, ngf, position_embedding_flag=False, layer_num=per_block_layer_num,)
-        self.downblock2 = AttentionBlock(ngf, ngf * 2, position_embedding_flag=per_layer_position_embedding_flag, layer_num=per_block_layer_num,)
-        self.downblock3 = AttentionBlock(ngf * 2, ngf * 4, position_embedding_flag=per_layer_position_embedding_flag, layer_num=per_block_layer_num,)
-        self.downblock4 = AttentionBlock(ngf * 4, ngf * 8, position_embedding_flag=per_layer_position_embedding_flag, layer_num=per_block_layer_num,)
-        self.downblock5 = AttentionBlock(ngf * 8, ngf * 8, resize=False, position_embedding_flag=per_layer_position_embedding_flag, layer_num=per_block_layer_num,)
+            self.downblock1 = AttentionBlock(input_nc + 1, ngf, position_embedding_flag=False, layer_num=per_block_layer_num, linear_position_embedding_flag=linear_position_embedding_flag)
+        self.downblock2 = AttentionBlock(ngf, ngf * 2, position_embedding_flag=per_layer_position_embedding_flag, layer_num=per_block_layer_num, linear_position_embedding_flag=linear_position_embedding_flag,)
+        self.downblock3 = AttentionBlock(ngf * 2, ngf * 4, position_embedding_flag=per_layer_position_embedding_flag, layer_num=per_block_layer_num, linear_position_embedding_flag=linear_position_embedding_flag,)
+        self.downblock4 = AttentionBlock(ngf * 4, ngf * 8, position_embedding_flag=per_layer_position_embedding_flag, layer_num=per_block_layer_num, linear_position_embedding_flag=linear_position_embedding_flag,)
+        self.downblock5 = AttentionBlock(ngf * 8, ngf * 8, resize=False, position_embedding_flag=per_layer_position_embedding_flag, layer_num=per_block_layer_num, linear_position_embedding_flag=linear_position_embedding_flag,)
         # no resizing occurs in the last block of each path
         # self.downblock6 = AttentionBlock(ngf * 8, ngf * 8, resize=False)
 
@@ -817,10 +827,10 @@ class Attention(nn.Module):
         )
 
         # self.upblock1 = AttentionBlock(2 * ngf * 8, ngf * 8)
-        self.upblock2 = AttentionBlock(2 * ngf * 8, ngf * 8, position_embedding_flag=per_layer_position_embedding_flag, layer_num=per_block_layer_num,)
-        self.upblock3 = AttentionBlock(2 * ngf * 8, ngf * 4, position_embedding_flag=per_layer_position_embedding_flag, layer_num=per_block_layer_num,)
-        self.upblock4 = AttentionBlock(2 * ngf * 4, ngf * 2, position_embedding_flag=per_layer_position_embedding_flag, layer_num=per_block_layer_num,)
-        self.upblock5 = AttentionBlock(2 * ngf * 2, ngf, position_embedding_flag=per_layer_position_embedding_flag, layer_num=per_block_layer_num,)
+        self.upblock2 = AttentionBlock(2 * ngf * 8, ngf * 8, position_embedding_flag=per_layer_position_embedding_flag, layer_num=per_block_layer_num, linear_position_embedding_flag=linear_position_embedding_flag,)
+        self.upblock3 = AttentionBlock(2 * ngf * 8, ngf * 4, position_embedding_flag=per_layer_position_embedding_flag, layer_num=per_block_layer_num, linear_position_embedding_flag=linear_position_embedding_flag,)
+        self.upblock4 = AttentionBlock(2 * ngf * 4, ngf * 2, position_embedding_flag=per_layer_position_embedding_flag, layer_num=per_block_layer_num, linear_position_embedding_flag=linear_position_embedding_flag,)
+        self.upblock5 = AttentionBlock(2 * ngf * 2, ngf, position_embedding_flag=per_layer_position_embedding_flag, layer_num=per_block_layer_num, linear_position_embedding_flag=linear_position_embedding_flag,)
         # no resizing occurs in the last block of each path
         self.upblock6 = AttentionBlock(2 * ngf, ngf, resize=False, layer_num=per_block_layer_num)
 
@@ -830,7 +840,10 @@ class Attention(nn.Module):
         # Downsampling blocks
         if self.position_embedding_flag:
             x, _ = self.downblock0(torch.cat((x, log_s_k), dim=1))
-            x = x + self.position_embedding
+            if self.linear_position_embedding_flag:
+                x = torch.cat([x, self.position_embedding], dim=1)
+            else:
+                x = x + self.position_embedding
             x, skip1 = self.downblock1(x)
         else:
             x, skip1 = self.downblock1(torch.cat((x, log_s_k), dim=1))
