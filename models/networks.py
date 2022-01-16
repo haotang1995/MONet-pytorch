@@ -727,17 +727,21 @@ class AttentionBlock(nn.Module):
             self.linear_position_embedding_flag = linear_position_embedding_flag
             self.position_embedding = None
         size_list = [input_nc+2*position_embedding_flag*linear_position_embedding_flag,] + [output_nc,] * layer_num
-        self.module = nn.Sequential(*tuple(
-            mod
-            for li in range(layer_num)
-            for mod in [
-                nn.Conv2d(size_list[li], size_list[li+1], 3, padding=1, bias=False,),
-                nn.InstanceNorm2d(size_list[li+1], affine=True,),
-                nn.ReLU(),
-            ]
-        ))
-        # self.conv = nn.Conv2d(input_nc, output_nc, 3, padding=1, bias=False)
-        # self.norm = nn.InstanceNorm2d(output_nc, affine=True)
+
+        self.layer_num = layer_num
+        if self.layer_num > 1:
+            self.module = nn.Sequential(*tuple(
+                mod
+                for li in range(layer_num)
+                for mod in [
+                    nn.Conv2d(size_list[li], size_list[li+1], 3, padding=1, bias=False,),
+                    nn.InstanceNorm2d(size_list[li+1], affine=True,),
+                    nn.ReLU(),
+                ]
+            ))
+        else: #TO be compatible with previous experimental runs
+            self.conv = nn.Conv2d(input_nc, output_nc, 3, padding=1, bias=False)
+            self.norm = nn.InstanceNorm2d(output_nc, affine=True)
         self._resize = resize
 
     def forward(self, *inputs, size=None,):
@@ -752,10 +756,12 @@ class AttentionBlock(nn.Module):
             else:
                 x = x + self.position_embedding
 
-        x = skip = self.module(x)
-        # x = self.conv(x)
-        # x = self.norm(x)
-        # x = skip = F.relu(x)
+        if self.layer_num > 1:
+            x = skip = self.module(x)
+        else:
+            x = self.conv(x)
+            x = self.norm(x)
+            x = skip = F.relu(x)
 
         if self._resize or size is not None:
             x = F.interpolate(skip, size=size, scale_factor=None if size is not None else (0.5 if downsampling else 2.), mode='nearest')
